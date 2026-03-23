@@ -85,24 +85,38 @@ st.session_state.setdefault("pool", [])
 st.session_state.setdefault("master", pd.DataFrame())
 
 # ================= LOGIN (REPLIT SAFE) =================
-st.sidebar.title("Login")
+st.sidebar.title("Login / Signup")
 
-u = st.sidebar.text_input("Username")
-p = st.sidebar.text_input("Password", type="password")
+tab1, tab2 = st.sidebar.tabs(["Login", "Signup"])
 
-if st.sidebar.button("Login"):
-    if login_user(u, p):
-        st.session_state.logged_in = True
-        st.session_state.user = u
-        st.sidebar.success("Login successful")
-    else:
-        st.sidebar.error("Invalid login")
+# LOGIN
+with tab1:
+    u = st.text_input("Username")
+    p = st.text_input("Password", type="password")
 
-if not st.session_state.logged_in:
+    if st.button("Login"):
+        if login_user(u, p):
+            st.session_state.logged_in = True
+            st.session_state.user = u
+            st.success("Login successful")
+        else:
+            st.error("Invalid login")
+
+# SIGNUP
+with tab2:
+    new_u = st.text_input("New Username")
+    new_p = st.text_input("New Password", type="password")
+
+    if st.button("Create Account"):
+        if create_user(new_u, new_p):
+            st.success("Account created! Now login.")
+        else:
+            st.error("User already exists")
+
+# STOP if not logged in
+if not st.session_state.get("logged_in", False):
     st.warning("Please login to continue")
     st.stop()
-
-st.sidebar.success(f"Welcome {st.session_state.user}")
 
 # ================= MENU =================
 menu = st.sidebar.radio("Menu", ["Upload","Clean & Export","Advanced"])

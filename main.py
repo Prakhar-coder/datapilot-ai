@@ -1,4 +1,4 @@
-# ================= FINAL ULTRA-STABLE VERSION (INTEGRATED) =================
+# ================= FINAL ULTRA-STABLE VERSION (FULLY FIXED) =================
 import streamlit as st
 import pandas as pd
 import sqlite3
@@ -24,7 +24,7 @@ def hash_pw(p):
 
 def login_user(u, p):
     c.execute("SELECT * FROM users WHERE username=? AND password=?", (u, hash_pw(p)))
-    return f.fetchone() if (f := c.fetchone()) else None
+    return c.fetchone()
 
 def create_user(u, p):
     try:
@@ -40,22 +40,18 @@ def vision_extract(file):
         text = pytesseract.image_to_string(img)
         data = {"Date": None, "Vendor_Name": None, "Bill_Number": None, "Total_Amount": None}
         
-        # Extract Date
         date_match = re.search(r"\d{2}[-/]\d{2}[-/]\d{4}", text)
         if date_match: data["Date"] = date_match.group()
         
-        # Extract Largest Number as Amount
         amounts = re.findall(r"\d+\.\d+|\d+", text)
         if amounts: 
             try:
                 data["Total_Amount"] = max([float(a) for a in amounts])
             except: pass
         
-        # Extract Bill Number
         bill_match = re.search(r"(INV[- ]?\d+|BILL[- ]?\d+)", text.upper())
         if bill_match: data["Bill_Number"] = bill_match.group()
         
-        # Extract Vendor Name (usually first line)
         lines = [l.strip() for l in text.split("\n") if len(l.strip()) > 5]
         if lines: data["Vendor_Name"] = lines[0]
         
@@ -68,25 +64,21 @@ def validate(df):
     if df.empty: return df
     df = df.copy()
     
-    # 1. SMART MAPPING: Find the amount column regardless of the name in the CSV
-    # This ensures "Transaction Amount" is recognized correctly.
+    # SMART COLUMN MAPPING
     amt_col = next((c for c in ["Transaction Amount", "Total_Amount", "Amount"] if c in df.columns), None)
     
     if amt_col:
         df[amt_col] = pd.to_numeric(df[amt_col], errors="coerce")
-        # Flag if amount is missing or invalid
         df["flag_amount"] = df[amt_col].isna() | (df[amt_col] <= 0)
     else:
         df["flag_amount"] = False
 
-    # 2. Date Validation
     if "Date" in df.columns:
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
         df["flag_date"] = df["Date"].isna()
     else:
         df["flag_date"] = False
 
-    # 3. Final Flagging
     flag_cols = [c for c in df.columns if c.startswith("flag_")]
     if flag_cols:
         df["needs_review"] = df[flag_cols].any(axis=1)
@@ -110,7 +102,8 @@ if not st.session_state.logged_in:
             if login_user(u, p):
                 st.session_state.logged_in = True
                 st.rerun()
-            else: st.error("Login failed")
+            else: 
+                st.error("Login failed. Check credentials.")
             
     with tab2:
         nu = st.text_input("New Username")
@@ -124,7 +117,6 @@ menu = st.sidebar.radio("Navigation", ["Upload Hub", "Clean & Export"])
 
 # ================= UPLOAD PAGE =================
 if menu == "Upload Hub":
-    # Restriction added to prevent PDF errors in OCR
     files = st.file_uploader("Upload CSV or Images", accept_multiple_files=True, type=['csv', 'xlsx', 'png', 'jpg', 'jpeg'])
     
     if files:
@@ -137,7 +129,6 @@ if menu == "Upload Hub":
                         df = pd.read_excel(f)
                     else:
                         df = vision_extract(f)
-                    
                     st.session_state.pool.append({"name": f.name, "data": df, "selected": True})
                     st.success(f"Added: {f.name}")
                 except Exception as e:
@@ -163,26 +154,19 @@ elif menu == "Clean & Export":
 
     df = st.session_state.master
 
-    if st.button("Auto Clean (Full Data)"):
-        # 1. Drop true duplicates
+    if st.button("Auto Clean (Keep All Rows)"):
         cleaned = df.drop_duplicates()
-        
-        # 2. Run the smart validation (Detects 'Transaction Amount' vs 'Total_Amount')
         st.session_state.master = validate(cleaned)
-        
         st.success(f"Cleaned! Showing {len(st.session_state.master)} records.")
         st.rerun()
 
-    # Data Editor
-    st.info("You can edit cells directly in the table below:")
+    st.info("Edit cells directly below if needed:")
     edited_df = st.data_editor(st.session_state.master)
     
     st.divider()
     
-    # DOWNLOAD SECTION
     c1, c2 = st.columns(2)
     with c1:
-        # This button gives you all 1000 rows
         st.download_button(
             label="📥 Download Full Dataset (All Rows)",
             data=edited_df.to_csv(index=False),
@@ -191,7 +175,6 @@ elif menu == "Clean & Export":
         )
     
     with c2:
-        # This button gives you only rows that passed validation
         if "needs_review" in edited_df.columns:
             clean_only = edited_df[~edited_df["needs_review"]]
             st.download_button(
@@ -200,5 +183,3 @@ elif menu == "Clean & Export":
                 file_name="clean_export.csv",
                 mime="text/csv"
             )
-
-print("APP ENGINE RUNNING...")

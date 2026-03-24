@@ -11,10 +11,11 @@ import datetime
 st.set_page_config(page_title="DataPilot AI Enterprise", layout="wide", page_icon="🚀")
 
 # ================= 2. DATABASE SETUP =================
-# Added client_id to support multiple business owners in mapping
+# We use a persistent connection for the session
 conn = sqlite3.connect("datapilot_v3.db", check_same_thread=False)
 c = conn.cursor()
 c.execute("CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)")
+# Primary key is now a combination of client and ocr_name to allow unique maps per owner
 c.execute("""CREATE TABLE IF NOT EXISTS ledger_map 
              (client_id TEXT, ocr_name TEXT, tally_name TEXT, 
              PRIMARY KEY (client_id, ocr_name))""")
@@ -51,7 +52,6 @@ def generate_tally_xml(df):
         except:
             d = datetime.datetime.now().strftime('%Y%m%d')
             
-        # Use mapped name if available, else original
         v_name = row.get('Tally_Ledger_Name', row['Vendor_Name'])
         
         xml_output += f"""
@@ -112,20 +112,33 @@ if "logged_in" not in st.session_state: st.session_state.logged_in = False
 if "pool" not in st.session_state: st.session_state.pool = []
 
 if not st.session_state.logged_in:
-    st.title("🔐 DataPilot AI: Secure Login")
-    u = st.sidebar.text_input("Username")
-    p = st.sidebar.text_input("Password", type="password")
-    if st.sidebar.button("Login"):
-        if login_user(u, p):
-            st.session_state.logged_in = True
-            st.rerun()
-    st.info("Login from the sidebar to continue.")
+    st.title("🔐 DataPilot AI: Secure Access")
+    with st.sidebar:
+        st.header("Access Control")
+        u = st.text_input("Username")
+        p = st.text_input("Password", type="password")
+        
+        col1, col2 = st.columns(2)
+        if col1.button("Login"):
+            if login_user(u, p):
+                st.session_state.logged_in = True
+                st.rerun()
+            else:
+                st.error("Invalid credentials")
+        
+        if col2.button("Signup"):
+            if create_user(u, p):
+                st.success("Account created! Now login.")
+            else:
+                st.error("User already exists")
+    st.info("Please login from the sidebar to start processing bills.")
     st.stop()
 
-# ================= 7. CLIENT SELECTION & NAVIGATION =================
-st.sidebar.success("Authenticated")
+# ================= 7. CLIENT NAVIGATION =================
+st.sidebar.success("Logged In Successfully")
+# This dropdown allows the CA to manage 10+ different clients separately
 client_id = st.sidebar.selectbox("Select Business Owner", 
-                                ["Owner_A", "Owner_B", "Owner_C", "Owner_D"])
+                                ["Owner_A", "Owner_B", "Owner_C", "Owner_D", "Owner_E"])
 
 if st.sidebar.button("Logout"):
     st.session_state.logged_in = False
@@ -137,95 +150,97 @@ menu = st.sidebar.radio("Navigation", ["1. Upload & Pre-Audit", "2. Ledger Mappi
 
 # --- PAGE 1: UPLOAD & PRE-AUDIT ---
 if menu == "1. Upload & Pre-Audit":
-    st.header(f"📂 Processing Bills for: {client_id}")
+    st.header(f"📂 Processing for: {client_id}")
     files = st.file_uploader("Upload Bill Images", accept_multiple_files=True, type=['png', 'jpg', 'jpeg'])
     
     if files:
         for f in files:
+            # Check if file is already processed in the current session
             if not any(x['name'] == f.name for x in st.session_state.pool):
                 with st.spinner(f"Extracting {f.name}..."):
                     df = vision_extract(f)
                     if not df.empty:
-                        st.session_state.pool.append({"name": f.name, "data": df, "selected": True, "client": client_id})
+                        # We tag the data with the client_id selected at time of upload
+                        st.session_state.pool.append({"name": f.name, "data": df, "client": client_id})
 
     if st.session_state.pool:
-        # Filter pool for current client
-        client_files = [x for x in st.session_state.pool if x["client"] == client_id]
+        # Filter pool for ONLY the currently selected client
+        current_client_data = [x for x in st.session_state.pool if x["client"] == client_id]
         
-        if client_files:
-            master_data = pd.concat([x["data"] for x in client_files], ignore_index=True)
+        if current_client_data:
+            master_df = pd.concat([x["data"] for x in current_client_data], ignore_index=True)
             
-            # CHECK MAPPING STATUS IMMEDIATELY
+            # --- PRE-MAPPING CHECK ---
             c.execute("SELECT ocr_name FROM ledger_map WHERE client_id=?", (client_id,))
-            mapped_list = [r[0] for r in c.fetchall()]
+            saved_mappings = [r[0] for r in c.fetchall()]
             
-            all_vendors = master_data['Vendor_Name'].unique()
-            missing = [v for v in all_vendors if v not in mapped_list]
+            all_vendors = master_df['Vendor_Name'].unique()
+            missing_vendors = [v for v in all_vendors if v not in saved_mappings]
             
-            # --- Status Metrics ---
             st.divider()
             m1, m2, m3 = st.columns(3)
-            m1.metric("Total Transactions", len(master_data))
-            m2.metric("Ready for Tally", len(master_data) - master_data['Vendor_Name'].isin(missing).sum())
-            m3.metric("Missing Mappings", len(missing))
+            m1.metric("Total Bills", len(master_df))
+            m2.metric("Ready for Tally", len(master_df) - master_df['Vendor_Name'].isin(missing_vendors).sum())
+            m3.metric("Action Required", len(missing_vendors))
 
-            if missing:
-                st.error(f"⚠️ {len(missing)} unique vendors need mapping before Tally Export.")
-                with st.expander("Show Missing Vendors"):
-                    st.write("Go to 'Ledger Mapping' and add these raw names:")
-                    st.table(pd.DataFrame(missing, columns=["OCR Vendor Name"]))
+            if missing_vendors:
+                st.error(f"⚠️ {len(missing_vendors)} unique vendors are not mapped to Tally ledgers.")
+                with st.expander("View Missing Vendor List"):
+                    st.write("Go to 'Ledger Mapping' and link these raw names to Tally ledgers:")
+                    st.table(pd.DataFrame(missing_vendors, columns=["OCR Vendor Name"]))
             else:
-                st.success("✅ All vendors are mapped. Proceed to Export!")
+                st.success("✅ Perfect! All vendors are recognized. Ready for Export.")
 
             st.subheader("Data Preview")
-            st.dataframe(master_data, use_container_width=True)
+            st.dataframe(master_df, use_container_width=True)
+        else:
+            st.info("No bills uploaded for this specific owner yet.")
 
 # --- PAGE 2: LEDGER MAPPING ---
 elif menu == "2. Ledger Mapping":
-    st.header(f"🔗 Tally Ledger Dictionary: {client_id}")
+    st.header(f"🔗 Tally Ledger Mapping: {client_id}")
+    st.write("Link messy bill names to your exact Tally Ledger names.")
     
     with st.form("mapping_form", clear_on_submit=True):
-        o = st.text_input("Vendor Name on Bill (OCR Raw Name)")
-        t = st.text_input("Exact Name in Tally ERP Ledger")
-        if st.form_submit_button("Save Rule"):
-            if o and t:
-                c.execute("INSERT OR REPLACE INTO ledger_map VALUES (?,?,?)", (client_id, o.strip(), t.strip()))
+        col1, col2 = st.columns(2)
+        with col1:
+            raw_ocr = st.text_input("Vendor Name on Bill (OCR Name)")
+        with col2:
+            clean_tally = st.text_input("Exact Name in Tally Ledger")
+            
+        if st.form_submit_button("Save Mapping"):
+            if raw_ocr and clean_tally:
+                c.execute("INSERT OR REPLACE INTO ledger_map VALUES (?,?,?)", (client_id, raw_ocr.strip(), clean_tally.strip()))
                 conn.commit()
-                st.success(f"Linked '{o}' to '{t}'")
+                st.success(f"Mapping saved for {client_id}!")
             else:
-                st.error("Please provide both names.")
+                st.error("Please fill both fields.")
     
     st.divider()
-    st.subheader("Saved Mappings")
+    st.subheader("Stored Dictionary")
     mapping_df = pd.read_sql(f"SELECT ocr_name, tally_name FROM ledger_map WHERE client_id='{client_id}'", conn)
-    st.table(mapping_df)
+    st.dataframe(mapping_df, use_container_width=True)
 
 # --- PAGE 3: EXPORT ---
 elif menu == "3. Export to Tally":
-    st.header(f"📑 Final Audit & XML Export: {client_id}")
+    st.header(f"📑 Audit & XML Export: {client_id}")
     
-    # Re-check pool for client
-    client_files = [x for x in st.session_state.pool if x["client"] == client_id]
+    client_data = [x for x in st.session_state.pool if x["client"] == client_id]
     
-    if client_files:
-        raw_df = pd.concat([x["data"] for x in client_files], ignore_index=True)
+    if client_data:
+        export_df = pd.concat([x["data"] for x in client_data], ignore_index=True)
         
-        # Apply Mappings
+        # Apply Mapping logic
         c.execute("SELECT ocr_name, tally_name FROM ledger_map WHERE client_id=?", (client_id,))
-        maps = dict(c.fetchall())
+        mapping_dict = dict(c.fetchall())
         
-        raw_df['Tally_Ledger_Name'] = raw_df['Vendor_Name'].map(maps).fillna(raw_df['Vendor_Name'])
+        export_df['Tally_Ledger_Name'] = export_df['Vendor_Name'].map(mapping_dict).fillna(export_df['Vendor_Name'])
         
-        st.write("Edit any values manually if required:")
-        edited = st.data_editor(raw_df, num_rows="dynamic", use_container_width=True)
+        st.write("Edit values before generating XML:")
+        final_edited = st.data_editor(export_df, use_container_width=True, num_rows="dynamic")
         
-        # Recalculate tax on edits
-        for i, r in edited.iterrows():
-            tx, gs = calculate_gst_breakup(r['Total_Amount'], r['GST_Rate'])
-            edited.at[i, 'Taxable_Value'] = tx
-            edited.at[i, 'GST_Amount'] = gs
-
-        if st.download_button("🚀 Download Tally XML", generate_tally_xml(edited), f"{client_id}_export.xml"):
+        if st.download_button("🚀 Download Tally XML", generate_tally_xml(final_edited), f"{client_id}_tally.xml"):
             st.balloons()
+            st.success("XML Generated! Import this file into Tally using 'Import Data > Transactions'.")
     else:
-        st.warning("No data found. Upload bills first.")
+        st.warning("No processed data found. Please upload bills first.")
